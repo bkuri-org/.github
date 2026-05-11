@@ -1,0 +1,93 @@
+name: Notify Push
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: "Repository name (owner/repo)"
+        required: true
+        type: string
+      branch:
+        description: "Branch that was pushed to"
+        required: true
+        type: string
+      sha:
+        description: "Commit SHA"
+        required: true
+        type: string
+      author:
+        description: "Push author"
+        required: true
+        type: string
+      commit_message:
+        description: "Head commit message"
+        required: false
+        type: string
+      compare_url:
+        description: "GitHub compare URL"
+        required: false
+        type: string
+    secrets:
+      github_token:
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send ntfy notification
+        env:
+          GH_TOKEN: ${{ secrets.github_token }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          NTFY_URL: "https://ntfy.kuri.casa/org"
+          REPO: ${{ inputs.repo }}
+          BRANCH: ${{ inputs.branch }}
+          SHA: ${{ inputs.sha }}
+          AUTHOR: ${{ inputs.author }}
+          COMMIT: ${{ inputs.commit_message }}
+          COMPARE: ${{ inputs.compare_url }}
+        run: |
+          # Skip if no commit (branch deletion)
+          if [ -z "$COMMIT" ]; then
+            echo "No commit message, skipping notification"
+            exit 0
+          fi
+
+          # First line of commit message, truncated
+          COMMIT_TITLE=$(echo "$COMMIT" | head -1 | cut -c1-120)
+          SHORT_SHA="${SHA:0:7}"
+          REPO_SHORT="${REPO#*/}"
+
+          # Look up open PR for this branch
+          PR_DATA=$(gh api "repos/$REPO/pulls?head=$REPO:$BRANCH&state=open" 2>/dev/null || echo '[]')
+          PR_URL=$(echo "$PR_DATA" | jq -r '.[0].html_url // empty')
+          PR_NUMBER=$(echo "$PR_DATA" | jq -r '.[0].number // empty')
+
+          if [ -n "$PR_URL" ]; then
+            TITLE="[$REPO_SHORT] PR #$PR_NUMBER — $BRANCH"
+            CLICK="$PR_URL"
+            TAGS="github,pr"
+          else
+            TITLE="[$REPO_SHORT] $BRANCH ($SHORT_SHA)"
+            CLICK="$COMPARE"
+            TAGS="github,push"
+          fi
+
+          echo "Sending notification: $TITLE"
+
+          HTTP_CODE=$(curl -s -o /tmp/ntfy-response -w "%{http_code}" \
+            -X POST "$NTFY_URL" \
+            -H "Authorization: Bearer $NTFY_TOKEN" \
+            -H "Title: $TITLE" \
+            -H "Click: $CLICK" \
+            -H "Tags: $TAGS" \
+            -H "Priority: default" \
+            -d "$COMMIT_TITLE")
+
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "Failed to send notification (HTTP $HTTP_CODE)"
+            cat /tmp/ntfy-response
+            exit 1
+          fi
+
+          echo "Notification sent successfully"
